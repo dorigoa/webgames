@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>Snake</title>
+<style>
+  :root{
+    --bg:#0d1b12; --panel:#12251a; --accent:#7fd66a; --text:#e8f5e0;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    background:radial-gradient(circle at 50% 30%, #16301f, var(--bg) 70%);
+    color:var(--text);
+    font-family:"Courier New",monospace;
+    display:flex; flex-direction:column; align-items:center; min-height:100vh;
+    user-select:none;
+  }
+  h1{letter-spacing:.4em; margin:14px 0 4px; color:var(--accent); text-shadow:0 0 12px #2e7d32;}
+  #hudFood{
+    font-weight:bold; color:var(--accent); letter-spacing:.1em;
+    text-shadow:0 0 8px rgba(127,214,106,.7);
+    min-width:92px; text-align:right;
+  }
+  #hudFood.low{color:#ff6b5e; text-shadow:0 0 8px rgba(229,57,53,.8);}
+  #hud{
+    width:720px; display:flex; justify-content:space-between;
+    padding:6px 4px; font-size:14px; color:#bfe3ad;
+  }
+  #wrap{position:relative;}
+  canvas{
+    background:#0a140d; border:3px solid #2e5c3a; border-radius:6px;
+    box-shadow:0 0 25px #000 inset, 0 6px 20px rgba(0,0,0,.6);
+    display:block;
+  }
+  .overlay{
+    position:absolute; inset:0; background:rgba(6,14,9,.88);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:14px; border-radius:6px; text-align:center;
+  }
+  .overlay h2{color:var(--accent); letter-spacing:.2em;}
+  .overlay p{font-size:13px; color:#9fc79a; max-width:480px; line-height:1.6;}
+  .btn{
+    background:#1c3a26; color:var(--text); border:2px solid #3f7a4d;
+    padding:10px 26px; font-family:inherit; font-size:16px; cursor:pointer;
+    border-radius:4px; letter-spacing:.1em; min-width:220px;
+    transition:all .15s;
+  }
+  .btn:hover{background:#2e5c3a; box-shadow:0 0 12px #4caf50aa; transform:scale(1.04);}
+  .hidden{display:none !important;}
+  .scorelist{font-size:13px; color:#cde6c4; margin-top:6px; white-space:pre; line-height:1.5;}
+  #help{font-size:11px; color:#6d9468; margin:8px; text-align:center;}
+  #saveState{font-size:10px; color:#557a52; margin-top:2px;}
+  .badge{font-size:11px; border:1px solid #3f7a4d; border-radius:3px; padding:1px 6px; margin-left:8px; color:#9fc79a;}
+</style>
+</head>
+<body>
+<h1>SNAKE</h1>
+<div id="hud">
+  <span id="hudLevel">Livello: —</span>
+  <span id="hudLives">Vite: —</span>
+  <span id="hudScore">Punti: 0</span>
+  <span id="hudBest">Record: —</span>
+  <span id="hudFood">🍎 —</span>
+</div>
+<div id="wrap">
+  <canvas id="game" width="720" height="480"></canvas>
+
+  <!-- MENU -->
+  <div id="menu" class="overlay">
+    <h2>SCEGLI IL LIVELLO</h2>
+    <button class="btn" data-level="easy">EASY <span class="badge">10 rocce</span></button>
+    <button class="btn" data-level="normal">NORMAL <span class="badge">15 rocce</span></button>
+    <button class="btn" data-level="hard">HARD <span class="badge">25 rocce</span></button>
+    <div class="scorelist" id="menuScores"></div>
+    <p>Frece direzionali: muoverti &middot; P: pausa &middot; ESC: esci dal gioco &middot; 5 vite a disposizione</p>
+    <div id="saveState"></div>
+  </div>
+
+  <!-- PAUSA -->
+  <div id="pause" class="overlay hidden">
+    <h2>PAUSA</h2>
+    <p>Premi <b>P</b> per riprendere &middot; ESC per uscire dal gioco</p>
+  </div>
+
+  <!-- GAME OVER -->
+  <div id="gameover" class="overlay hidden">
+    <h2>GAME OVER</h2>
+    <div id="goScore" style="font-size:18px;"></div>
+    <div class="scorelist" id="goScores"></div>
+    <button class="btn" id="btnRetry">RIGIOCA</button>
+    <button class="btn" id="btnMenu">MENU'</button>
+  </div>
+</div>
+<div id="help">ESC in qualsiasi momento esce dal gioco &mdash; P mette in pausa/riprende</div>
+
+<script>
+"use strict";
+/* ============================================================
+   SNAKE — grafica e suoni 100% procedurali
+   High score salvati nella home directory dell'utente
+   (File System Access API, fallback localStorage)
+   ============================================================ */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const CELL = 24, COLS = canvas.width / CELL, ROWS = canvas.height / CELL;
+
+/* Configurazione livelli.
+   step:       intervallo tick iniziale (ms) — si accorcia a ogni mela
+   stepMin:    limite di velocita' (ms per tick)
+   foodLife:   durata iniziale di una mela (ms) — piu' bassa nei livelli difficili
+   foodMin:    limite inferiore della durata (ms) al calcolare del timeout
+   foodDecay:  quanti ms si tolgono alla durata per ogni mela mangiata */
+const LEVELS = {
+  easy:   {name:"Easy",   obstacles: 10, step: 160, stepMin: 115, foodLife: 12000, foodMin: 6000, foodDecay: 120},
+  normal: {name:"Normal", obstacles: 15, step: 110, stepMin:  80, foodLife:  9000, foodMin: 4500, foodDecay: 150},
+  hard:   {name:"Hard",   obstacles: 25, step:  75, stepMin:  55, foodLife:  6000, foodMin: 3000, foodDecay: 180},
+};
+const SPEEDUP = 0.985;   // il serpente accelera dell'1.5% a ogni mela
+
+/* ---------- stato di gioco ---------- */
+let state = "menu";           // menu | playing | paused | gameover
+let level = null;
+let snake, dir, nextDir, obstacles, food, score, stepMs, lastStep, deathAt = 0;
+let frozenAlpha = null;   // interp. congelata durante la pausa
+let foodLife = 0;         // durata corrente della mela (ms), decresce col punteggio
+let foodRemain = 0;       // tempo residuo della mela congelato in pausa (ms)
+let lives = 0;
+const MAX_LIVES = 5;
+let particles = [];
+let frame = 0;
+
+/* ============================================================
+   AUDIO procedurale (WebAudio)
+   ============================================================ */
+let AC = null;
+function audio(){ if(!AC) AC = new (window.AudioContext||window.webkitAudioContext)(); if(AC.state !== "running") AC.resume(); return AC; }
+function tone(freq, dur, type="square", vol=0.15, slideTo=null, delay=0){
+  try{
+    const ac = audio(), t = ac.currentTime + delay;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if(slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g).connect(ac.destination);
+    o.start(t); o.stop(t + dur + .02);
+  }catch(e){}
+}
+function noiseBurst(dur, vol=0.3, delay=0){
+  try{
+    const ac = audio(), t = ac.currentTime + delay;
+    const n = Math.floor(ac.sampleRate * dur), buf = ac.createBuffer(1, n, ac.sampleRate);
+    const d = buf.getChannelData(0);
+    for(let i=0;i<n;i++) d[i] = (Math.random()*2-1) * (1 - i/n);
+    const s = ac.createBufferSource(), g = ac.createGain();
+    s.buffer = buf;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    s.connect(g).connect(ac.destination); s.start(t);
+  }catch(e){}
+}
+const sndEat   = ()=>{ tone(520,.08,"square",.12); tone(780,.1,"square",.12,null,.07); tone(1040,.12,"triangle",.1,null,.14); };
+const sndDie   = ()=>{ tone(300,.5,"sawtooth",.18,60); noiseBurst(.35,.25,.05); tone(150,.6,"square",.1,40,.15); };
+const sfxTurn  = ()=> tone(200,.03,"triangle",.04);
+const sndStart = ()=>{ tone(392,.09,"square",.1); tone(523,.09,"square",.1,null,.1); tone(659,.14,"square",.1,null,.2); };
+const sndPause = ()=> tone(440,.08,"sine",.1,330);
+const sndQuit  = ()=> tone(400,.25,"sine",.12,120);
+
+/* Sblocco/risblocco audio: la policy autoplay dei browser sospende
+   l'AudioContext dopo un reload o il cambio scheda, e i suoni "scompaiono".
+   Al primo click o pressione di tasto (gesto utente autorizzato)
+   ricreiamo/riprendiamo il contesto. */
+function unlockAudio(){ try{ audio(); }catch(e){} }
+document.addEventListener("pointerdown", unlockAudio, {capture:true});
+document.addEventListener("keydown",     unlockAudio, {capture:true});
+
+/* ============================================================
+   HIGH SCORES — salvataggio nella home directory dell'utente.
+   Uso la File System Access API: l'utente può scegliere la
+   propria home directory (o qualsiasi cartella) e il gestore
+   del file viene persistito in IndexedDB. Fallback: localStorage.
+   ============================================================ */
+const LS_KEY = "snakeHighscores";
+let fsHandle = null;
+
+/* -- IndexedDB per persistere l'handle del file -- */
+function idb(mode, fn){
+  return new Promise((res, rej)=>{
+    const rq = indexedDB.open("snakeFs", 1);
+    rq.onupgradeneeded = e => e.target.result.createObjectStore("handles");
+    rq.onerror = ()=>rej(rq.error);
+    rq.onsuccess = ()=>{
+      const db = rq.result;
+      const tx = db.transaction("handles", mode);
+      const st = tx.objectStore("handles");
+      const r = fn(st);
+      tx.oncomplete = ()=>res(r && r.result !== undefined ? r.result : r);
+      tx.onerror = ()=>rej(tx.error);
+    };
+  });
+}
+
+function defaultScores(){ return {easy:[], normal:[], hard:[]}; }
+
+function loadScoresLocal(){
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    if(raw){ const s = JSON.parse(raw); return Object.assign(defaultScores(), s); }
+  }catch(e){}
+  return defaultScores();
+}
+function saveScoresLocal(scores){
+  try{ localStorage.setItem(LS_KEY, JSON.stringify(scores)); }catch(e){}
+}
+
+let highScores = loadScoresLocal();
+
+async function loadScoresFile(){
+  if(!fsHandle) return null;
+  try{
+    if(fsHandle.queryPermission) {
+      const p = await fsHandle.queryPermission({mode:"readwrite"});
+      if(p !== "granted") return null;
+    }
+    const f = await fsHandle.getFile();
+    const s = JSON.parse(await f.text());
+    return Object.assign(defaultScores(), s);
+  }catch(e){ return null; }
+}
+async function saveScoresFile(scores){
+  if(!fsHandle) return false;
+  try{
+    const w = await fsHandle.createWritable();
+    await w.write(JSON.stringify(scores, null, 2));
+    await w.close();
+    return true;
+  }catch(e){ return false; }
+}
+
+async function chooseScoresFile(){
+  // showSaveFilePicker parte di solito dalla home / ultima cartella:
+  // l'utente può salvare "snake_highscores.json" nella home directory.
+  const h = await window.showSaveFilePicker({
+    suggestedName: "snake_highscores.json",
+    types: [{description:"High Score Snake", accept:{"application/json":[".json"]}}]
+  });
+  if(h.queryPermission && (await h.queryPermission({mode:"readwrite"})) !== "granted")
+    if((await h.requestPermission({mode:"readwrite"})) !== "granted") return;
+  fsHandle = h;
+  await idb("readwrite", st => st.put(fsHandle, "scores"));
+  const fromFile = await loadScoresFile();
+  if(!fromFile) await saveScoresFile(highScores);   // primo salvataggio
+  else highScores = fromFile;
+  setSaveState();
+}
+
+function setSaveState(){
+  const el = document.getElementById("saveState");
+  el.textContent = fsHandle
+    ? "\uD83D\uDCC1 High score salvati su file: " + fsHandle.name
+    : (window.showSaveFilePicker
+        ? "\uD83D\uDCC2 Salvataggio su file non attivo (fallback: localStorage)"
+        : "\uD83D\uDCC2 High score in localStorage (browser non supporta il salvataggio su file)");
+}
+
+async function initHighscores(){
+  if(window.showSaveFilePicker){
+    try{
+      const h = await idb("readonly", st => st.get("scores"));
+      if(h){ fsHandle = h; const s = await loadScoresFile(); if(s) highScores = s; }
+    }catch(e){}
+  }
+  setSaveState();
+}
+
+async function persistScores(){
+  saveScoresLocal(highScores);
+  if(fsHandle) await saveScoresFile(highScores);
+}
+
+async function submitScore(lv, sc){
+  if(sc <= 0) return;
+  const arr = highScores[lv];
+  arr.push({score: sc, date: new Date().toLocaleDateString("it-IT")});
+  arr.sort((a,b)=>b.score-a.score);
+  highScores[lv] = arr.slice(0,5);
+  await persistScores();
+}
+
+function bestOf(lv){
+  const a = highScores[lv];
+  return a && a.length ? a[0].score : 0;
+}
+
+function scoresText(lv){
+  const a = highScores[lv] || [];
+  if(!a.length) return LEVELS[lv].name.toUpperCase()+": nessun punteggio";
+  return "— " + LEVELS[lv].name.toUpperCase() + " —\n" +
+    a.map((e,i)=>(i+1)+". "+String(e.score).padStart(4," ")+"  ("+e.date+")").join("\n");
+}
+function allScoresText(){
+  return ["easy","normal","hard"].map(scoresText).join("\n");
+}
+
+/* ============================================================
+   UTILITÀ — RNG deterministico per disegnare rocce coerenti
+   ============================================================ */
+function seededRand(seed){
+  let s = seed >>> 0 || 1;
+  return function(){
+    s ^= s << 13; s >>>= 0;
+    s ^= s >> 17;
+    s ^= s << 5;  s >>>= 0;
+    return s / 4294967296;
+  };
+}
+const key = (x,y)=> x+","+y;
+
+/* ============================================================
+   LOGICA DI GIOCO
+   ============================================================ */
+function occupiedSet(extraSnake){
+  const s = new Set();
+  obstacles.forEach(o=>s.add(key(o.x,o.y)));
+  if(food) s.add(key(food.x,food.y));
+  if(extraSnake) extraSnake.forEach(p=>s.add(key(p.x,p.y)));
+  return s;
+}
+/* Cibo e ostacoli non appaiono mai nella stessa casella
+   (né sopra il serpente). */
+function freeCell(exclude){
+  let x, y, guard = 0;
+  do{
+    x = (Math.random()*COLS)|0;
+    y = (Math.random()*ROWS)|0;
+    guard++;
+    if(guard > 5000) return null;
+  }while(exclude.has(key(x,y)));
+  return {x,y};
+}
+
+/* Esclude le 8 caselle adiacenti a una roccia: le rocce risultano
+   ben distribuite sul campo, mai ammassate in gruppi. */
+function addNeighbors(excl, c){
+  for(let dx=-1;dx<=1;dx++)
+    for(let dy=-1;dy<=1;dy++){
+      const nx = c.x+dx, ny = c.y+dy;
+      if(nx>=0 && ny>=0 && nx<COLS && ny<ROWS) excl.add(key(nx,ny));
+    }
+}
+
+/* Zona sicura di sola partenza: mai rocce vicino al serpente
+   né lungo la sua intera direzione di movimento (fila davanti alla testa). */
+function computeStartZone(){
+  const z = new Set();
+  const sy = Math.floor(ROWS/2);
+  // buffer attorno a ogni segmento iniziale (raggio 2)
+  for(const px of [1,2,3])
+    for(let dx=-2;dx<=2;dx++)
+      for(let dy=-2;dy<=2;dy++)
+        z.add(key(px+dx, sy+dy));
+  // intera fila davanti alla testa: direzione di movimento libera
+  for(let x=4;x<COLS;x++) z.add(key(x, sy));
+  return z;
+}
+
+/* Ricostruisce i segmenti spostandoli in avanti.
+   px,py = posizione del segmento al tick precedente: serve al
+   rendering per interpolare e rendere il movimento fluido. */
+function advanceSnake(head, ate){
+  const old = snake.map(s=>({x:s.x, y:s.y}));
+  const n = old.length + (ate?1:0);
+  const ns = [];
+  for(let i=0;i<n;i++){
+    const cur = (i===0) ? head : old[i-1];
+    let prv = (i<old.length) ? old[i] : old[old.length-1];
+    // nessun "trascinamento" attraverso lo schermo al wrap (demo)
+    if(Math.abs(cur.x-prv.x)>1 || Math.abs(cur.y-prv.y)>1) prv = {x:cur.x, y:cur.y};
+    ns.push({x:cur.x, y:cur.y, px:prv.x, py:prv.y});
+  }
+  snake = ns;
+}
+
+function initialSnake(){
+  const sy = Math.floor(ROWS/2);
+  return [3,2,1].map(x=>({x, y:sy, px:x, py:sy}));
+}
+
+function startGame(lv){
+  level = lv;
+  const cfg = LEVELS[lv];
+  snake = initialSnake();
+  dir = {x:1,y:0}; nextDir = dir;
+  score = 0;
+  lives = MAX_LIVES;
+  foodLife = cfg.foodLife;          // riparte dal valore base del livello
+  frozenAlpha = null;
+  particles = [];
+  obstacles = [];
+  food = null;
+  // ostacoli: mai sul serpente, mai l'uno sopra l'altro,
+  // MAI vicino al serpente né sulla sua direzione di movimento
+  const excl = occupiedSet(snake);
+  computeStartZone().forEach(c=>excl.add(c));
+  for(let i=0;i<cfg.obstacles;i++){
+    const c = freeCell(excl);
+    if(!c) break;
+    obstacles.push(c);
+    excl.add(key(c.x,c.y));
+    addNeighbors(excl, c);          // distanza minima fra rocce
+  }
+  spawnFood();
+  stepMs = cfg.step;
+  lastStep = performance.now();
+  state = "playing";
+  showOverlay(null);
+  updateHud();
+  sndStart();
+}
+
+function spawnFood(){
+  const c = freeCell(occupiedSet(snake));   // mai su ostacoli/serpente/cibo
+  if(c) c.expiresAt = performance.now() + foodLife;   // timeout della mela
+  food = c;
+}
+
+function updateHud(){
+  document.getElementById("hudLevel").textContent = "Livello: " + (level ? LEVELS[level].name : "—");
+  document.getElementById("hudLives").textContent = level
+    ? "Vite: " + "\u2764".repeat(Math.max(0,lives)) + "\u00B7".repeat(Math.max(0,MAX_LIVES-lives))
+    : "Vite: —";
+  document.getElementById("hudScore").textContent = "Punti: " + score;
+  document.getElementById("hudBest").textContent  = level ? "Record ("+LEVELS[level].name+"): " + bestOf(level) : "Record: —";
+}
+
+/* Morte del serpente: scala una vita; se vite esaurite → game over.
+   Altrimenti respawn del serpente dopo un breve pausa. */
+function die(){
+  state = "respawn";
+  deathAt = performance.now();
+  sndDie();
+  // particelle di morte
+  const h = snake[0];
+  for(let i=0;i<26;i++){
+    const a = Math.random()*Math.PI*2, sp = 1+Math.random()*3;
+    particles.push({
+      x: h.x*CELL+CELL/2, y: h.y*CELL+CELL/2,
+      vx: Math.cos(a)*sp, vy: Math.sin(a)*sp,
+      life: 1, col: i%3 ? "#7fd66a" : "#e53935", r: 2+Math.random()*3
+    });
+  }
+  lives--;
+  updateHud();
+  if(lives > 0){
+    setTimeout(()=>{ if(state === "respawn") respawnSnake(); }, 1000);
+  }else{
+    state = "gameover";
+    // mostra subito la schermata (non dipendere dal salvataggio async)
+    const fillText = ()=>{
+      document.getElementById("goScore").textContent =
+        "Vite esaurite!  Punti: " + score + "  (record: " + bestOf(level) + ")";
+      document.getElementById("goScores").textContent = scoresText(level);
+      updateHud();
+    };
+    fillText();
+    showOverlay("gameover");
+    submitScore(level, score).then(()=>{ if(state === "gameover") fillText(); });
+  }
+}
+
+/* Ripartenza del serpente dopo la perdita di una vita:
+   le eventuali rocce nella zona di partenza/direzione vengono
+   ricollocate altrove. */
+function respawnSnake(){
+  snake = initialSnake();
+  dir = {x:1,y:0}; nextDir = dir;
+  frozenAlpha = null;
+  const zone = computeStartZone();
+  let removed = 0;
+  obstacles = obstacles.filter(o=>{
+    if(zone.has(key(o.x,o.y))){ removed++; return false; }
+    return true;
+  });
+  if(food && (zone.has(key(food.x,food.y)) || snake.some(p=>p.x===food.x&&p.y===food.y)))
+    food = null;
+  const excl = occupiedSet(snake);
+  zone.forEach(c=>excl.add(c));
+  obstacles.forEach(o=>addNeighbors(excl, o));   // mantiene la distribuzione
+  for(let i=0;i<removed;i++){
+    const c = freeCell(excl);
+    if(c){ obstacles.push(c); excl.add(key(c.x,c.y)); addNeighbors(excl, c); }
+  }
+  spawnFood();   // dopo la morte la mela ricompare sempre (la precedente poteva scadere)
+  particles = [];
+  lastStep = performance.now();
+  state = "playing";
+}
+
+function quitToMenu(){
+  state = "menu";
+  level = null;
+  sndQuit();
+  showOverlay("menu");
+  refreshMenu();
+  updateHud();
+}
+
+function step(now){
+  if(state !== "playing") return;
+  if(now - lastStep < stepMs) return;
+  lastStep += stepMs;                 // passo su griglia temporale costante
+  if(now - lastStep > stepMs) lastStep = now;  // recupero dopo lag
+
+  // mela scaduta: sparisce e ne compare una nuova altrove
+  if(food && now >= food.expiresAt){
+    burst(food.x*CELL+CELL/2, food.y*CELL+CELL/2, "#8a4a4a", 8);
+    spawnFood();
+  }
+
+  dir = nextDir;
+  const head = {x: snake[0].x + dir.x, y: snake[0].y + dir.y};
+
+  // muri
+  if(head.x < 0 || head.y < 0 || head.x >= COLS || head.y >= ROWS) return die();
+  // ostacoli letali
+  for(const o of obstacles) if(o.x === head.x && o.y === head.y) return die();
+  // sé stesso
+  for(let i=0;i<snake.length-1;i++) if(snake[i].x === head.x && snake[i].y === head.y) return die();
+
+  const ate = !!(food && head.x === food.x && head.y === food.y);
+  advanceSnake(head, ate);
+  if(ate){
+    score += (level === "easy" ? 5 : level === "normal" ? 10 : 15);
+    sndEat();
+    burst(food.x*CELL+CELL/2, food.y*CELL+CELL/2, "#e53935", 10);
+    // il timeout delle mele successive si accorcia col punteggio
+    const cfg = LEVELS[level];
+    foodLife = Math.max(cfg.foodMin, cfg.foodLife - score * cfg.foodDecay);
+    // e il serpente accelera leggermente (non cresce solo di lunghezza)
+    stepMs = Math.max(cfg.stepMin, stepMs * SPEEDUP);
+    spawnFood();
+    updateHud();
+  }
+}
+
+function burst(x,y,col,n){
+  for(let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2, sp = .5+Math.random()*2;
+    particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:1,col,r:1.5+Math.random()*2});
+  }
+}
+
+/* ============================================================
+   DISEGNO PROCEDURALE
+   ============================================================ */
+function drawBoard(){
+  // sfondo uniforme con leggera griglia a linee sottili
+  ctx.fillStyle = "#0a140d";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle = "rgba(127,214,106,0.055)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for(let x=1;x<COLS;x++){ ctx.moveTo(x*CELL+0.5,0); ctx.lineTo(x*CELL+0.5,canvas.height); }
+  for(let y=1;y<ROWS;y++){ ctx.moveTo(0,y*CELL+0.5); ctx.lineTo(canvas.width,y*CELL+0.5); }
+  ctx.stroke();
+}
+
+/* --- mela rossa procedurale --- */
+/* Timer mela nella barra informativa in alto (cifre digitali).
+   Fuori dal campo di gioco: nessuna sovrapposizione con le mele. */
+function updateFoodClock(){
+  const el = document.getElementById("hudFood");
+  if(!el) return;
+  if((state === "playing" || state === "paused") && food){
+    const remain = state === "paused"
+      ? foodRemain
+      : Math.max(0, food.expiresAt - performance.now());
+    const secs = Math.max(0, remain/1000);
+    el.textContent = "\uD83C\uDF4E " + secs.toFixed(1).padStart(4,"0") + "s";
+    const low = secs < Math.max(2.5, foodLife/1000 * 0.25);
+    el.classList.toggle("low", low);
+    el.style.opacity = (low && Math.floor(frame/10)%2 === 0) ? "0.4" : "1";
+  }else{
+    el.textContent = "\uD83C\uDF4E \u2014";
+    el.classList.remove("low");
+    el.style.opacity = "1";
+  }
+}
+
+function drawApple(cx, cy, size){
+  const r = size/2;
+  const bob = Math.sin(frame*0.08)*1.2;
+  ctx.save();
+  ctx.translate(cx, cy + bob);
+  // ombra
+  ctx.fillStyle = "rgba(0,0,0,.35)";
+  ctx.beginPath(); ctx.ellipse(0, r*0.95, r*0.85, r*0.28, 0, 0, Math.PI*2); ctx.fill();
+  // corpo: due lobi per la forma a mela
+  const g = ctx.createRadialGradient(-r*0.35,-r*0.4,r*0.1, 0,0, r*1.25);
+  g.addColorStop(0, "#ff6b5e");
+  g.addColorStop(0.45, "#d81b1b");
+  g.addColorStop(1, "#7c0f0f");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.arc(-r*0.32, 0, r*0.78, 0, Math.PI*2);
+  ctx.arc( r*0.32, 0, r*0.78, 0, Math.PI*2);
+  ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0,0, r*0.92, r*0.86, 0, 0, Math.PI*2); ctx.fill();
+  // riflesso lucido
+  ctx.fillStyle = "rgba(255,255,255,.55)";
+  ctx.beginPath(); ctx.ellipse(-r*0.35,-r*0.4, r*0.22, r*0.13, -0.6, 0, Math.PI*2); ctx.fill();
+  // torsolo (incavo)
+  ctx.strokeStyle = "#5a0a0a"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(0,-r*0.75, r*0.2, 0.2, Math.PI-0.2); ctx.stroke();
+  // torsolo
+  ctx.strokeStyle = "#5d4024"; ctx.lineWidth = Math.max(1.5, r*0.14); ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(0,-r*0.7);
+  ctx.quadraticCurveTo(r*0.08,-r*1.05, r*0.02,-r*1.25); ctx.stroke();
+  // foglia
+  ctx.fillStyle = "#3f9b3f";
+  ctx.beginPath();
+  ctx.ellipse(r*0.35,-r*1.05, r*0.4, r*0.17, -0.5, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = "#2c6e2c"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(r*0.08,-r*0.95); ctx.lineTo(r*0.62,-r*1.15); ctx.stroke();
+  ctx.restore();
+}
+
+/* --- roccia procedurale (forma deterministica per casella) --- */
+function drawRock(cell){
+  const rnd = seededRand((cell.x*73856093) ^ (cell.y*19349663));
+  const cx = cell.x*CELL + CELL/2, cy = cell.y*CELL + CELL/2;
+  const R = CELL*0.42;
+  ctx.save();
+  ctx.translate(cx, cy);
+  // ombra
+  ctx.fillStyle = "rgba(0,0,0,.4)";
+  ctx.beginPath(); ctx.ellipse(1, R*0.75, R*0.95, R*0.35, 0, 0, Math.PI*2); ctx.fill();
+  // contorno poligonale "sasso"
+  const pts = [];
+  const n = 8;
+  for(let i=0;i<n;i++){
+    const a = (i/n)*Math.PI*2;
+    const rr = R*(0.72 + rnd()*0.35);
+    pts.push([Math.cos(a)*rr, Math.sin(a)*rr*0.85]);
+  }
+  const g = ctx.createLinearGradient(-R,-R,R*0.6,R);
+  g.addColorStop(0,"#9a9a9a"); g.addColorStop(0.55,"#6b6b6b"); g.addColorStop(1,"#3d3d3d");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0],pts[0][1]);
+  for(let i=1;i<n;i++) ctx.lineTo(pts[i][0],pts[i][1]);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#2b2b2b"; ctx.lineWidth = 1; ctx.stroke();
+  // crepe procedurali
+  ctx.strokeStyle = "rgba(30,30,30,.7)"; ctx.lineWidth = 0.8;
+  const cracks = 1 + (rnd()*2|0);
+  for(let c=0;c<cracks;c++){
+    let px = (rnd()-0.5)*R, py = (rnd()-0.5)*R*0.6;
+    ctx.beginPath(); ctx.moveTo(px,py);
+    for(let s=0;s<3;s++){ px += (rnd()-0.5)*R*0.7; py += (rnd()-0.3)*R*0.5; ctx.lineTo(px,py); }
+    ctx.stroke();
+  }
+  // luminescenza
+  ctx.fillStyle = "rgba(255,255,255,.28)";
+  ctx.beginPath(); ctx.ellipse(-R*0.3,-R*0.35, R*0.28, R*0.16, -0.5, 0, Math.PI*2); ctx.fill();
+  // sassolini attorno
+  for(let i=0;i<2;i++){
+    const a = rnd()*Math.PI*2, d = R*(0.9+rnd()*0.25);
+    ctx.fillStyle = "#575757";
+    ctx.beginPath(); ctx.arc(Math.cos(a)*d, Math.sin(a)*d*0.7+R*0.3, 1+rnd()*1.4, 0, Math.PI*2); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* --- serpente con muso orientato e lingua animata --- */
+function drawSnake(now){
+  const t = now/1000;
+  // Interpolazione fluida tra cella precedente e attuale
+  let alpha = 1;
+  if(state === "playing" && stepMs) alpha = Math.max(0, Math.min(1, (now - lastStep) / stepMs));
+  else if(state === "paused" && frozenAlpha !== null) alpha = frozenAlpha;
+  const rx = s => (s.px + (s.x - s.px) * alpha) * CELL;
+  const ry = s => (s.py + (s.y - s.py) * alpha) * CELL;
+  // lingua: ciclo dentro/fuori dalla bocca
+  const flick = Math.max(0, Math.sin(t*7));           // 0..1
+  const tongueOut = flick * flick * (CELL*0.62);      // sfarfallio nervoso
+
+  // corpo: segmento per segmento con gradiente
+  for(let i = snake.length-1; i >= 1; i--){
+    const p = snake[i];
+    const x = rx(p), y = ry(p);
+    const shade = 1 - (i/snake.length)*0.5;
+    const w = CELL * (0.72 - 0.18*(i/snake.length));
+    const g = ctx.createRadialGradient(x+CELL/2-w*0.15, y+CELL/2-w*0.2, 1, x+CELL/2, y+CELL/2, w*0.75);
+    g.addColorStop(0, "rgb("+ (90*shade|0) +","+ (190*shade|0) +","+ (70*shade|0) +")");
+    g.addColorStop(1, "rgb("+ (30*shade|0) +","+ (100*shade|0) +","+ (35*shade|0) +")");
+    ctx.fillStyle = g;
+    roundRect(x+(CELL-w)/2, y+(CELL-w)/2, w, w, w*0.42);
+    ctx.fill();
+    // scaglia
+    if(i%2===0){
+      ctx.fillStyle = "rgba(255,255,180,"+(0.10*shade)+")";
+      ctx.beginPath();
+      ctx.arc(x+CELL/2, y+CELL/2, w*0.18, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  // ------ TESTA ------
+  const h = snake[0];
+  const cx = rx(h) + CELL/2, cy = ry(h) + CELL/2;
+  const ang = Math.atan2(dir.y, dir.x);
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.rotate(ang);                        // il muso guarda la direzione di marcia
+
+  const HL = CELL*0.78, HW = CELL*0.66;   // lunghezza / larghezza testa
+
+  // collo
+  ctx.fillStyle = "#3e8e41";
+  roundRect(-CELL*0.45, -HW/2+2, CELL*0.5, HW-4, 6); ctx.fill();
+
+  // testa a cuneo
+  const g = ctx.createLinearGradient(0,-HW/2,0,HW/2);
+  g.addColorStop(0,"#66c95e"); g.addColorStop(0.5,"#43a047"); g.addColorStop(1,"#2c6e31");
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(HL*0.62, 0);                                  // punta del muso
+  ctx.quadraticCurveTo(HL*0.5, -HW*0.52, -HL*0.3, -HW*0.5);
+  ctx.quadraticCurveTo(-HL*0.55, 0, -HL*0.3, HW*0.5);
+  ctx.quadraticCurveTo(HL*0.5, HW*0.52, HL*0.62, 0);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = "#1d4d21"; ctx.lineWidth = 1.2; ctx.stroke();
+
+  // narici
+  ctx.fillStyle = "#1d4d21";
+  ctx.beginPath(); ctx.arc(HL*0.44, -HW*0.12, 1, 0, Math.PI*2); ctx.arc(HL*0.44, HW*0.12, 1, 0, Math.PI*2); ctx.fill();
+
+  // occhi
+  for(const s of [-1,1]){
+    const ex = HL*0.14, ey = s*HW*0.32;
+    ctx.fillStyle = "#f7f2c9";
+    ctx.beginPath(); ctx.arc(ex, ey, HW*0.17, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#111";
+    ctx.beginPath(); ctx.arc(ex + HW*0.06, ey, HW*0.085, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.85)";
+    ctx.beginPath(); ctx.arc(ex + HW*0.03, ey - HW*0.05, HW*0.035, 0, Math.PI*2); ctx.fill();
+  }
+
+  // bocca (linea sorridente sul muso)
+  ctx.strokeStyle = "#173f1a"; ctx.lineWidth = 1.4; ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(HL*0.55, 0);
+  ctx.quadraticCurveTo(HL*0.2, HW*0.16, -HL*0.12, HW*0.10);
+  ctx.stroke();
+
+  // lingua: esce e rientra continuamente dalla bocca
+  if(tongueOut > 0.5){
+    const base = {x: HL*0.5, y: 0};
+    const wave = Math.sin(t*18)*2.2;
+    ctx.strokeStyle = "#e0245e"; ctx.lineWidth = 1.8; ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    const midX = base.x + tongueOut*0.6, midY = wave*0.5;
+    const tipX = base.x + tongueOut, tipY = wave;
+    ctx.quadraticCurveTo(midX, midY, tipX, tipY);
+    ctx.stroke();
+    // biforcazione (lingua a forcella)
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX + 3.5, tipY - 2.4 + wave*0.3);
+    ctx.moveTo(tipX, tipY);
+    ctx.lineTo(tipX + 3.5, tipY + 2.4 + wave*0.3);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function roundRect(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+function drawParticles(){
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.life -= 0.025;
+    if(p.life <= 0){ particles.splice(i,1); continue; }
+    ctx.globalAlpha = Math.max(0,p.life);
+    ctx.fillStyle = p.col;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r*p.life,0,Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function render(now){
+  drawBoard();
+  obstacles.forEach(drawRock);
+  if(food && state !== "gameover") drawApple(food.x*CELL+CELL/2, food.y*CELL+CELL/2, CELL*0.72);
+  if(snake && (state === "playing" || state === "paused" || state === "respawn" || state === "menu")) drawSnake(now);
+  if(state === "gameover" || state === "respawn"){
+    // lampeggio rosso sulla testa
+    const h = snake[0];
+    if(Math.floor((now-deathAt)/160)%2===0){
+      ctx.fillStyle = "rgba(229,57,53,.45)";
+      ctx.fillRect(h.x*CELL, h.y*CELL, CELL, CELL);
+    }
+  }
+  drawParticles();
+  updateFoodClock();
+  if(state === "paused"){
+    ctx.fillStyle = "rgba(0,0,0,.15)";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+  }
+}
+
+/* ============================================================
+   LOOP
+   ============================================================ */
+function loop(now){
+  frame++;
+  if(state === "playing") step(now);
+  if(state === "playing" || state === "paused" || state === "gameover" || state === "respawn" || state === "menu")
+    render(now);
+  requestAnimationFrame(loop);
+}
+
+/* ============================================================
+   UI / INPUT
+   ============================================================ */
+function showOverlay(id){
+  ["menu","pause","gameover"].forEach(o=>
+    document.getElementById(o).classList.toggle("hidden", o !== id));
+}
+function refreshMenu(){
+  document.getElementById("menuScores").textContent = allScoresText();
+  setSaveState();
+}
+
+document.querySelectorAll("#menu .btn[data-level]").forEach(b=>
+  b.addEventListener("click", ()=>{ try{ audio(); }catch(e){} startGame(b.dataset.level); }));
+document.getElementById("btnRetry").addEventListener("click", ()=>{ try{ audio(); }catch(e){} startGame(level); });
+document.getElementById("btnMenu").addEventListener("click", ()=>{ try{ audio(); }catch(e){} quitToMenu(); });
+
+if(window.showSaveFilePicker){
+  const pick = document.createElement("button");
+  pick.className = "btn";
+  pick.style.minWidth = "220px";
+  pick.textContent = "\uD83D\uDCC1 SALVA HIGH SCORE NELLA HOME…";
+  pick.addEventListener("click", async ()=>{
+    try{ await chooseScoresFile(); }
+    catch(e){ if(e && e.name !== "AbortError") console.warn(e); }
+  });
+  const menu = document.getElementById("menu");
+  menu.insertBefore(pick, document.getElementById("menuScores"));
+}
+
+document.addEventListener("keydown", e=>{
+  const k = e.key;
+
+  if(k === "Escape"){
+    if(state === "playing" || state === "paused" || state === "gameover" || state === "respawn"){
+      e.preventDefault(); quitToMenu();
+    }
+    return;
+  }
+  if((k === "p" || k === "P") && (state === "playing" || state === "paused")){
+    e.preventDefault();
+    if(state === "playing"){
+      frozenAlpha = Math.max(0, Math.min(1, (performance.now() - lastStep) / stepMs));
+      // congela anche il timeout della mela
+      foodRemain = food ? Math.max(0, food.expiresAt - performance.now()) : 0;
+      state = "paused"; showOverlay("pause");
+    }
+    else {
+      // riparte dall'interpolazione congelata: nessun salto
+      lastStep = performance.now() - (frozenAlpha || 0) * stepMs;
+      frozenAlpha = null;
+      // riprende il countdown della mela dal punto in cui era fermo
+      if(food) food.expiresAt = performance.now() + foodRemain;
+      state = "playing"; showOverlay(null);
+    }
+    sndPause();
+    return;
+  }
+  if(state !== "playing") return;
+
+  let nd = null;
+  if(k === "ArrowUp")    nd = {x:0,y:-1};
+  if(k === "ArrowDown")  nd = {x:0,y:1};
+  if(k === "ArrowLeft")  nd = {x:-1,y:0};
+  if(k === "ArrowRight") nd = {x:1,y:0};
+  if(!nd) return;
+  e.preventDefault();
+  // vieta inversioni a 180°
+  if(nd.x === -dir.x && nd.y === -dir.y) return;
+  if(nd.x !== nextDir.x || nd.y !== nextDir.y) sfxTurn();
+  nextDir = nd;
+});
+
+/* ---- demo snake dietro il menu ---- */
+function initDemo(){
+  snake = [];
+  for(let i=0;i<8;i++) snake.push({x:5+i, y:Math.floor(ROWS/2), px:5+i, py:Math.floor(ROWS/2)});
+  dir = {x:-1,y:0}; nextDir = dir;
+  obstacles = []; food = null;
+  setInterval(()=>{
+    if(state !== "menu") return;
+    // svolta casuale ogni tanto
+    if(Math.random() < 0.25){
+      const opts = [{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}]
+        .filter(d => !(d.x === -dir.x && d.y === -dir.y));
+      nextDir = opts[(Math.random()*opts.length)|0];
+    }
+    dir = nextDir;
+    let hx = snake[0].x + dir.x, hy = snake[0].y + dir.y;
+    if(hx<0) hx = COLS-1; if(hx>=COLS) hx = 0;
+    if(hy<0) hy = ROWS-1; if(hy>=ROWS) hy = 0;
+    advanceSnake({x:hx,y:hy}, false);
+  }, 240);
+}
+
+/* ---- avvio ---- */
+initHighscores();
+initDemo();
+refreshMenu();
+showOverlay("menu");
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
