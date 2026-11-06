@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cylinder Particle Simulator</title>
+<style>
+  :root{
+    --bg:#0e1420; --panel:#182236; --ink:#e8eefb; --muted:#8fa2c4; --accent:#4dc3ff; --accent2:#ffb454;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:radial-gradient(1200px 700px at 50% -10%, #1a2540 0%, var(--bg) 60%);
+    color:var(--ink); font-family:'Segoe UI',system-ui,Arial,sans-serif;
+    display:flex; flex-direction:column; align-items:center; padding:18px;
+  }
+  h1{font-size:20px; font-weight:600; margin:4px 0 12px; letter-spacing:.5px}
+  canvas{
+    background:#0a0f1a; border-radius:10px; box-shadow:0 10px 40px rgba(0,0,0,.5);
+    max-width:100%; height:auto; touch-action:none;
+  }
+  .panel{
+    margin-top:14px; background:var(--panel); border:1px solid #26344f; border-radius:10px;
+    padding:14px 18px; display:flex; flex-wrap:wrap; gap:18px 28px; align-items:center;
+    box-shadow:0 6px 24px rgba(0,0,0,.35); max-width:980px; justify-content:center;
+  }
+  .ctrl{display:flex; flex-direction:column; gap:4px; min-width:220px}
+  .ctrl label{font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.8px}
+  .ctrl .val{color:var(--accent); font-weight:600}
+  input[type=range]{width:220px; accent-color:var(--accent); cursor:pointer}
+  #wallSlider{accent-color:var(--accent2)}
+  .stats{
+    font-size:13px; color:var(--muted); display:flex; gap:18px; flex-wrap:wrap;
+    border-left:1px solid #26344f; padding-left:20px;
+  }
+  .stats b{color:var(--ink); font-variant-numeric:tabular-nums}
+  .stats .temp b{color:var(--accent2)}
+  .hint{font-size:12px; color:var(--muted); margin-top:8px}
+  .btns{display:flex; gap:10px}
+  button{
+    background:#22314d; color:var(--ink); border:1px solid #334770; border-radius:8px;
+    padding:9px 14px; font-size:13px; font-family:inherit; cursor:pointer; transition:background .15s, transform .05s;
+  }
+  button:hover{background:#2c3f63}
+  button:active{transform:scale(.97)}
+  #wallBtn{border-color:var(--accent2); color:var(--accent2)}
+  #wallBtn.off{background:#5a2f2f; border-color:#e05555; color:#ffb3b3}
+  input[type=range]:disabled{opacity:.35; cursor:not-allowed}
+</style>
+</head>
+<body>
+<h1>Gas 2D in un cilindro &mdash; Pistone mobile</h1>
+<canvas id="c" width="960" height="500"></canvas>
+
+<div class="panel">
+  <div class="ctrl">
+    <label>Particelle: <span class="val" id="nVal">100</span></label>
+    <input type="range" id="nSlider" min="1" max="500" step="1" value="100">
+  </div>
+  <div class="ctrl">
+    <label>Vel. quadratica media &radic;&langle;v&sup2;&rangle;: <span class="val" id="vVal">160</span> px/s</label>
+    <input type="range" id="vSlider" min="20" max="500" step="1" value="160">
+  </div>
+  <div class="ctrl">
+    <label>Posizione Parete: <span class="val" id="wVal">50</span> %</label>
+    <input type="range" id="wallSlider" min="20" max="100" step="0.5" value="50">
+  </div>
+  <div class="ctrl">
+    <label>Comandi</label>
+    <div class="btns">
+      <button id="resetBtn" title="Riavvia la simulazione">⟳ Reset</button>
+      <button id="wallBtn" title="Rimuove/ripristina la parete mobile">Rimuovi parete</button>
+    </div>
+  </div>
+  <div class="stats">
+    <div>&radic;&langle;v&sup2;&rangle; = <b id="rmsOut">–</b></div>
+    <div class="temp">T = <b id="tOut">–</b> u.a.</div>
+    <div>KE = <b id="keOut">–</b></div>
+    <div>v pistone = <b id="wvOut">0</b></div>
+  </div>
+</div>
+<div class="hint">Trascina il pomello arancione (o il pistone) per comprimere / espandere il gas. Urti perfettamente elastici. Temperatura: T = m&ang;middot;&langle;v&sup2;&rang;/2k<sub>B</sub> con m = k<sub>B</sub> = 1.</div>
+
+<script>
+'use strict';
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+
+// ---------- geometry ----------
+const X0 = 50, X1 = 910;             // cylinder inner left / right
+const Y0 = 90, Y1 = 390;             // cylinder inner top / bottom
+const L = X1 - X0, H = Y1 - Y0;
+const R = 4;                          // particle radius
+const CELL = 4 * R;                   // spatial-hash cell
+
+// ---------- state ----------
+let particles = [];                   // {x,y,vx,vy}
+let nTarget = 100;
+let vrmsTarget = 160;
+let wallFrac = 0.5, wallX = X0 + 0.5 * L, wallV = 0;
+let wallOn = true;                    // piston present / removed (free diffusion)
+const WALL_MAX_SPEED = 900;
+
+// ---------- helpers ----------
+function gauss(){ return (Math.random()+Math.random()+Math.random()-1.5) * 1.732; } // ~N(0,1)
+
+function speedRms(){
+  if(!particles.length) return 0;
+  let s=0; for(const p of particles) s += p.vx*p.vx + p.vy*p.vy;
+  return Math.sqrt(s/particles.length);
+}
+
+function spawnOne(){
+  const right = Math.min(wallX - R - 1, X0 + 0.5*L);   // spawn in original left half if room
+  for(let t=0; t<400; t++){
+    const x = X0 + R + Math.random()*Math.max(1,(right - X0 - 2*R));
+    const y = Y0 + R + Math.random()*(H - 2*R);
+    let ok = true;
+    for(const q of particles){ const dx=q.x-x, dy=q.y-y; if(dx*dx+dy*dy < (2.2*R)*(2.2*R)){ ok=false; break; } }
+    if(ok){
+      const s = vrmsTarget;
+      return {x, y, vx: gauss()*s/Math.SQRT2, vy: gauss()*s/Math.SQRT2};
+    }
+  }
+  // fallback (overcrowded): place anyway
+  const s = vrmsTarget;
+  return {x: X0+R+Math.random()*Math.max(1,wallX-X0-2*R), y: Y0+R+Math.random()*(H-2*R),
+          vx: gauss()*s/Math.SQRT2, vy: gauss()*s/Math.SQRT2};
+}
+
+function setCount(n){
+  nTarget = n;
+  while(particles.length > n) particles.pop();
+  while(particles.length < n) particles.push(spawnOne());
+}
+
+function setVrms(v){
+  const cur = speedRms();
+  if(particles.length && cur > 1e-6){
+    const f = v/cur;
+    for(const p of particles){ p.vx*=f; p.vy*=f; }
+  }else{
+    for(const p of particles){ p.vx = gauss()*v/Math.SQRT2; p.vy = gauss()*v/Math.SQRT2; }
+  }
+}
+
+// ---------- physics ----------
+let grid = new Map();
+const NEIGH = [[1,0],[1,1],[0,1],[-1,1]];
+function gridKey(cx,cy){ return (cx+512)*4096 + (cy+512); }
+function buildGrid(){
+  grid.clear();
+  for(let i=0;i<particles.length;i++){
+    const p=particles[i], k=gridKey(Math.floor(p.x/CELL), Math.floor(p.y/CELL));
+    let a=grid.get(k); if(!a){a=[];grid.set(k,a);} a.push(i);
+  }
+}
+
+function collidePairs(){
+  buildGrid();
+  const d2 = (2*R)*(2*R);
+  for(const [k, arr] of grid){
+    const cx = Math.floor(k/4096) - 512, cy = (((k%4096)+4096)%4096) - 512;
+    for(let i=0;i<arr.length;i++){
+      const a = particles[arr[i]];
+      // same cell, later entries
+      for(let j=i+1;j<arr.length;j++) resolve(a, particles[arr[j]], d2);
+      // neighbour cells (only forward half to avoid double work)
+      for(const [ox,oy] of NEIGH){
+        const nb = grid.get(gridKey(cx+ox, cy+oy));
+        if(!nb) continue;
+        for(const bi of nb) resolve(a, particles[bi], d2);
+      }
+    }
+  }
+}
+
+function resolve(a, b, d2){
+  const dx=b.x-a.x, dy=b.y-a.y;
+  const d2v=dx*dx+dy*dy;
+  if(d2v >= d2 || d2v === 0) return;
+  const d = Math.sqrt(d2v), nx = dx/d, ny = dy/d;
+  const push = (2*R - d)/2 + 0.01;
+  a.x -= nx*push; a.y -= ny*push;
+  b.x += nx*push; b.y += ny*push;
+  // equal-mass elastic collision: swap normal velocity components if approaching
+  const vn = (a.vx-b.vx)*nx + (a.vy-b.vy)*ny;
+  if(vn > 0){
+    a.vx -= vn*nx; a.vy -= vn*ny;
+    b.vx += vn*nx; b.vy += vn*ny;
+  }
+}
+
+function step(dt){
+  // piston follows target with limited speed (only while present)
+  if(wallOn){
+    const targetX = X0 + wallFrac * L;
+    const maxDx = WALL_MAX_SPEED * dt;
+    const dx = Math.max(-maxDx, Math.min(maxDx, targetX - wallX));
+    wallV = dx / dt;
+    wallX += dx;
+  }else{
+    wallV = 0;
+  }
+
+  const SUB = 4, h = dt / SUB;
+  for(let s=0; s<SUB; s++){
+    for(const p of particles){
+      p.x += p.vx*h; p.y += p.vy*h;
+      // fixed walls
+      if(p.x < X0+R){ p.x = X0+R; p.vx = Math.abs(p.vx); }
+      if(p.y < Y0+R){ p.y = Y0+R; p.vy = Math.abs(p.vy); }
+      if(p.y > Y1-R){ p.y = Y1-R; p.vy = -Math.abs(p.vy); }
+      if(p.x > X1-R){ p.x = X1-R; p.vx = -Math.abs(p.vx); }   // right end (reachable once wall removed)
+      // moving piston (elastic reflection in piston frame)
+      if(wallOn && p.x > wallX - R){
+        p.x = wallX - R;
+        if(p.vx > wallV) p.vx = 2*wallV - p.vx;
+        // never let a particle outrun the piston to its right
+        if(p.vx > wallV) p.vx = wallV;
+      }
+    }
+    collidePairs();
+  }
+}
+
+// ---------- rendering ----------
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+
+  // cylinder body
+  ctx.lineWidth = 6; ctx.strokeStyle = '#3a4a68'; ctx.lineJoin='round';
+  ctx.beginPath();
+  ctx.roundRect(X0-6, Y0-6, L+12, H+12, 8);
+  ctx.stroke();
+  // closed (left) end cap, thicker
+  ctx.lineWidth = 10; ctx.strokeStyle = '#4a5c80';
+  ctx.beginPath(); ctx.moveTo(X0-6, Y0-10); ctx.lineTo(X0-6, Y1+10); ctx.stroke();
+
+  // empty right chamber (subtle hatch, only while piston is present)
+  if(wallOn){
+    ctx.save();
+    ctx.beginPath(); ctx.rect(wallX, Y0, X1-wallX, H); ctx.clip();
+    ctx.strokeStyle = 'rgba(255,255,255,0.03)'; ctx.lineWidth = 1;
+    for(let x=wallX-H; x<X1; x+=14){ ctx.beginPath(); ctx.moveTo(x,Y1); ctx.lineTo(x+H,Y0); ctx.stroke(); }
+    ctx.restore();
+  }
+
+  // particles (all the same color)
+  ctx.fillStyle = '#4dc3ff';
+  for(const p of particles){
+    ctx.beginPath(); ctx.arc(p.x, p.y, R, 0, 6.2832); ctx.fill();
+  }
+
+  if(!wallOn){
+    // ghost of the removed piston: dashed translucent line
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,180,84,0.25)'; ctx.lineWidth = 2; ctx.setLineDash([6,6]);
+    ctx.beginPath(); ctx.moveTo(wallX, Y0); ctx.lineTo(wallX, Y1); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle='rgba(255,180,84,0.5)'; ctx.font='12px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('parete rimossa', wallX, 60);
+    ctx.textAlign='left';
+    return;
+  }
+
+  // piston
+  const W = 12;
+  ctx.fillStyle = '#c9d4e8';
+  ctx.fillRect(wallX - W/2, Y0, W, H);
+  ctx.fillStyle = '#8fa2c4';
+  ctx.fillRect(wallX - W/2, Y0, W, 5); ctx.fillRect(wallX - W/2, Y1-5, W, 5);
+  // rubber seals
+  ctx.fillStyle = '#e05555';
+  ctx.beginPath(); ctx.moveTo(wallX-W/2,Y0+2); ctx.lineTo(wallX-W/2-5,Y0+7); ctx.lineTo(wallX-W/2,Y0+12); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(wallX+W/2,Y0+2); ctx.lineTo(wallX+W/2+5,Y0+7); ctx.lineTo(wallX+W/2,Y0+12); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(wallX-W/2,Y1-2); ctx.lineTo(wallX-W/2-5,Y1-7); ctx.lineTo(wallX-W/2,Y1-12); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(wallX+W/2,Y1-2); ctx.lineTo(wallX+W/2+5,Y1-7); ctx.lineTo(wallX+W/2,Y1-12); ctx.fill();
+
+  // handle: rod + knob above the piston
+  const knobY = 44;
+  ctx.strokeStyle = '#ffb454'; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(wallX, Y0-4); ctx.lineTo(wallX, knobY+10); ctx.stroke();
+  ctx.fillStyle = '#ffb454';
+  ctx.beginPath(); ctx.arc(wallX, knobY, 12, 0, 6.2832); ctx.fill();
+  ctx.fillStyle = '#7a5220'; ctx.font='bold 13px sans-serif'; ctx.textAlign='center';
+  ctx.fillText('⇔', wallX, knobY+5);
+
+  // position marker
+  ctx.fillStyle='#8fa2c4'; ctx.font='12px sans-serif';
+  ctx.fillText(Math.round(wallFrac*100)+'%', wallX, knobY-18);
+  ctx.textAlign='left';
+  ctx.fillText('parete fissa', X0+8, Y1+26);
+  ctx.textAlign='right';
+  ctx.fillText('pistone: trascinami', X1-8, Y1+26);
+  ctx.textAlign='left';
+}
+
+// ---------- main loop ----------
+let last = performance.now(), acc = 0, statTimer = 0;
+const FIXED = 1/60;
+
+// ---------- flow arrow (mean velocity, drawn just below the cylinder) ----------
+let arrowVx = 0;                      // smoothed <vx> shown by the arrow
+const ARROW_SAMPLES = 10;             // moving average over 10 samples
+const arrowBuf = new Float64Array(ARROW_SAMPLES);
+let arrowIdx = 0;
+function meanVx(){
+  if(!particles.length) return 0;
+  let s = 0; for(const p of particles) s += p.vx;
+  return s / particles.length;
+}
+function resetArrow(){ arrowBuf.fill(0); arrowVx = 0; }
+function drawFlowArrow(){
+  // sample <vx> every frame (as before), then show the moving average of the last 10
+  arrowBuf[arrowIdx] = meanVx();
+  arrowIdx = (arrowIdx + 1) % ARROW_SAMPLES;
+  let sum = 0; for(let i = 0; i < ARROW_SAMPLES; i++) sum += arrowBuf[i];
+  arrowVx = sum / ARROW_SAMPLES;
+  const y = 462, cx = X0 + L/2;
+
+  // baseline with zero tick
+  ctx.strokeStyle = '#243352'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(X0+20, y); ctx.lineTo(X1-20, y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, y-7); ctx.lineTo(cx, y+7); ctx.stroke();
+
+  ctx.fillStyle = '#8fa2c4'; ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('velocità media 〈vx〉  → verso e intensità della diffusione', X0+8, y-16);
+
+  const SCALE = 1.6, maxLen = L/2 - 45;
+  const len = Math.max(-maxLen, Math.min(maxLen, arrowVx * SCALE));
+
+  if(Math.abs(len) < 3){
+    // no net flow: just a dot at the origin
+    ctx.fillStyle = '#55688c';
+    ctx.beginPath(); ctx.arc(cx, y, 4, 0, 6.2832); ctx.fill();
+  }else{
+    const tip = cx + len, dir = Math.sign(len);
+    // color intensity grows with |<vx>|
+    const t = Math.min(1, Math.abs(len)/220);
+    const col = `hsl(${28 - 20*t}, 100%, ${55 + 10*t}%)`;
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 5; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(cx - dir*2, y); ctx.lineTo(tip - dir*10, y); ctx.stroke();
+    // arrowhead
+    ctx.beginPath();
+    ctx.moveTo(tip, y);
+    ctx.lineTo(tip - dir*13, y-8);
+    ctx.lineTo(tip - dir*13, y+8);
+    ctx.closePath(); ctx.fill();
+    // value next to the tip
+    ctx.font = 'bold 12px sans-serif'; ctx.textAlign = dir>0 ? 'left':'right';
+    ctx.fillText(arrowVx.toFixed(1) + ' px/s', tip + dir*8, y+4);
+  }
+  ctx.textAlign = 'left';
+}
+
+function frame(now){
+  let dt = (now-last)/1000; last = now;
+  if(dt > 0.1) dt = 0.1;
+  acc += dt;
+  while(acc >= FIXED){ step(FIXED); acc -= FIXED; }
+  draw();
+  drawFlowArrow();
+  statTimer += dt;
+  if(statTimer > 0.2){
+    statTimer = 0;
+    const rms = speedRms();
+    document.getElementById('rmsOut').textContent = rms.toFixed(1);
+    // 2D equipartition: (1/2) m <v^2> = (2/2) kB T  ->  T = <v^2>/2   (m = kB = 1)
+    document.getElementById('tOut').textContent = (0.5*rms*rms).toFixed(0);
+    document.getElementById('keOut').textContent = (0.5*rms*rms*particles.length).toFixed(0);
+    document.getElementById('wvOut').textContent = wallOn ? wallV.toFixed(0) : '–';
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------- UI ----------
+const nSlider=document.getElementById('nSlider'), vSlider=document.getElementById('vSlider'),
+      wSlider=document.getElementById('wallSlider');
+nSlider.addEventListener('input', ()=>{ document.getElementById('nVal').textContent=nSlider.value; setCount(+nSlider.value); });
+vSlider.addEventListener('input', ()=>{ document.getElementById('vVal').textContent=vSlider.value; vrmsTarget=+vSlider.value; setVrms(vrmsTarget); });
+wSlider.addEventListener('input', ()=>{ wallFrac=+wSlider.value/100; document.getElementById('wVal').textContent=wSlider.value; });
+
+// buttons: reset & remove/restore piston
+const wallBtn=document.getElementById('wallBtn');
+function setWallOn(on){
+  wallOn = on;
+  wallBtn.textContent = on ? 'Rimuovi parete' : 'Rimetti parete';
+  wallBtn.classList.toggle('off', !on);
+  wSlider.disabled = !on;
+}
+wallBtn.addEventListener('click', ()=> setWallOn(!wallOn));
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  setWallOn(true);
+  wallFrac = 0.5; wallX = X0 + 0.5*L; wallV = 0;
+  wSlider.value = 50; document.getElementById('wVal').textContent = '50';
+  particles = [];                 // respawn everything in the left half
+  setCount(nTarget);
+  resetArrow();
+});
+
+// piston dragging
+let dragging=false;
+function canvasXY(e){
+  const r=cv.getBoundingClientRect();
+  return {x:(e.clientX-r.left)*cv.width/r.width, y:(e.clientY-r.top)*cv.height/r.height};
+}
+function nearPiston(pt){
+  if(!wallOn) return false;
+  return (Math.hypot(pt.x-wallX, pt.y-44)<16) || (Math.abs(pt.x-wallX)<14 && pt.y>20 && pt.y<Y1+14);
+}
+cv.addEventListener('pointerdown', e=>{
+  const pt=canvasXY(e);
+  if(nearPiston(pt)){ dragging=true; cv.setPointerCapture(e.pointerId); cv.style.cursor='grabbing'; }
+});
+cv.addEventListener('pointermove', e=>{
+  const pt=canvasXY(e);
+  if(dragging){
+    wallFrac = Math.min(1, Math.max(0.2, (pt.x - X0)/L));
+    wSlider.value = (wallFrac*100).toFixed(1);
+    document.getElementById('wVal').textContent = (wallFrac*100).toFixed(1);
+  }else{
+    cv.style.cursor = nearPiston(pt) ? 'grab' : 'default';
+  }
+});
+cv.addEventListener('pointerup', ()=>{ dragging=false; cv.style.cursor='default'; });
+
+// ---------- init: piston at center, all particles in the LEFT half ----------
+setCount(nTarget);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
